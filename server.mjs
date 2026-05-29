@@ -10,7 +10,7 @@ const { HttpsProxyAgent } = httpsProxyAgent;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, "dist");
 const host = process.env.HOST || "0.0.0.0";
-const port = Number(process.env.PORT || 8080);
+const port = Number(process.env.PORT || 8089);
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
