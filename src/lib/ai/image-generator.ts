@@ -1017,7 +1017,7 @@ async function submitViaResponsesImage(
     model: IMAGE2_RESPONSES_MODEL,
     stream: true,
     store: true,
-    tool_choice: { type: 'image_generation' },
+    tool_choice: 'auto',
     input: [
       {
         role: 'user',
@@ -1046,7 +1046,7 @@ async function submitViaResponsesImage(
     size,
     stream: true,
     store: true,
-    toolChoice: 'image_generation',
+    toolChoice: 'auto',
     quality,
     outputFormat,
     hasReferenceImages: !!referenceImages?.length,
