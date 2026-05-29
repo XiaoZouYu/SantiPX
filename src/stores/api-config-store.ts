@@ -723,51 +723,61 @@ export const useAPIConfigStore = create<APIConfigStore>()(
             // auto-vip / legacy aggregator: /api/pricing_new 获取全量元数据（公开接口）
             const domain = baseUrl.replace(/\/v\d+$/, '');
             const pricingUrl = `${domain}/api/pricing_new`;
+            let pricingMetadataError = '';
 
-            const response = await corsFetch(pricingUrl);
-            if (!response.ok) {
-              return { success: false, count: 0, error: `pricing_new API 返回 ${response.status}${await readErrorSnippet(response)}` };
-            }
+            try {
+              const response = await corsFetch(pricingUrl);
+              if (response.ok) {
+                const json = await response.json();
+                const data: Array<{ model_name: string; model_type?: string; tags?: string; supported_endpoint_types?: string[]; enable_groups?: string[] }> = json.data;
+                if (Array.isArray(data) && data.length > 0) {
+                  console.log(`[APIConfig] Fetched ${data.length} models from pricing_new`);
 
-            const json = await response.json();
-            const data: Array<{ model_name: string; model_type?: string; tags?: string; supported_endpoint_types?: string[]; enable_groups?: string[] }> = json.data;
-            if (!Array.isArray(data) || data.length === 0) {
-              return { success: false, count: 0, error: '响应格式异常' };
-            }
+                  // Collect fresh OpenAI 兼容中转 metadata first.
+                  // After sync completes we remove only this provider's stale entries,
+                  // then merge these fresh values into the latest store state.
+                  for (const m of data) {
+                    const name = m.model_name;
+                    if (!name) continue;
+                    if (m.model_type) aggregatorTypes[name] = m.model_type;
+                    if (m.tags) {
+                      aggregatorTags[name] = typeof m.tags === 'string'
+                        ? m.tags.split(',').map((t: string) => t.trim()).filter(Boolean)
+                        : m.tags;
+                    }
+                    if (Array.isArray(m.supported_endpoint_types)) {
+                      aggregatorEndpoints[name] = m.supported_endpoint_types;
+                    }
+                    if (Array.isArray(m.enable_groups) && m.enable_groups.length > 0) {
+                      aggregatorEnableGroups[name] = m.enable_groups;
+                    }
+                  }
 
-            console.log(`[APIConfig] Fetched ${data.length} models from pricing_new`);
-
-            // Collect fresh OpenAI 兼容中转 metadata first.
-            // After sync completes we remove only this provider's stale entries,
-            // then merge these fresh values into the latest store state.
-            for (const m of data) {
-              const name = m.model_name;
-              if (!name) continue;
-              if (m.model_type) aggregatorTypes[name] = m.model_type;
-              if (m.tags) {
-                aggregatorTags[name] = typeof m.tags === 'string'
-                  ? m.tags.split(',').map((t: string) => t.trim()).filter(Boolean)
-                  : m.tags;
+                  // pricing_new 返回全量（公开列表），先收入
+                  for (const m of data) {
+                    if (typeof m.model_name === 'string' && m.model_name.length > 0) {
+                      allModelIds.add(m.model_name);
+                    }
+                  }
+                } else {
+                  pricingMetadataError = 'pricing_new 响应格式异常';
+                  console.warn(`[APIConfig] ${pricingMetadataError}; fallback to /v1/models`);
+                }
+              } else {
+                pricingMetadataError = `pricing_new API 返回 ${response.status}${await readErrorSnippet(response)}`;
+                console.warn(`[APIConfig] ${pricingMetadataError}; fallback to /v1/models`);
               }
-              if (Array.isArray(m.supported_endpoint_types)) {
-                aggregatorEndpoints[name] = m.supported_endpoint_types;
-              }
-              if (Array.isArray(m.enable_groups) && m.enable_groups.length > 0) {
-                aggregatorEnableGroups[name] = m.enable_groups;
-              }
-            }
-
-            // pricing_new 返回全量（公开列表），先收入
-            for (const m of data) {
-              if (typeof m.model_name === 'string' && m.model_name.length > 0) {
-                allModelIds.add(m.model_name);
-              }
+            } catch (error) {
+              pricingMetadataError = `pricing_new ${getNetworkErrorMessage(error)}`;
+              console.warn(`[APIConfig] ${pricingMetadataError}; fallback to /v1/models`, error);
             }
 
             // 再遍历每个 key 查 /v1/models 补充该 key 独有模型
             const modelsUrl = /\/v\d+$/.test(baseUrl)
               ? `${baseUrl}/models`
               : `${baseUrl}/v1/models`;
+            let anySuccess = false;
+            let lastError = pricingMetadataError;
 
             for (let ki = 0; ki < keys.length; ki++) {
               try {
@@ -776,12 +786,14 @@ export const useAPIConfigStore = create<APIConfigStore>()(
                 });
                 if (!resp.ok) {
                   const detail = await readErrorSnippet(resp);
+                  lastError = `key#${ki + 1} /v1/models 返回 ${resp.status}${detail}`;
                   console.warn(`[APIConfig] OpenAI 兼容中转 key#${ki + 1} /v1/models returned ${resp.status}${detail}, skip`);
                   continue;
                 }
                 const j = await resp.json();
                 const arr = normalizeModelListResponse(j);
                 if (!Array.isArray(arr)) continue;
+                anySuccess = true;
                 for (const m of arr) {
                   const id = typeof m === 'string' ? m : m.id;
                   if (typeof id === 'string' && id.length > 0) allModelIds.add(id);
@@ -792,8 +804,13 @@ export const useAPIConfigStore = create<APIConfigStore>()(
                 }
                 console.log(`[APIConfig] ${provider.name} key#${ki + 1} contributed models, total so far: ${allModelIds.size}`);
               } catch (e) {
+                lastError = `key#${ki + 1} /v1/models ${getNetworkErrorMessage(e)}`;
                 console.warn(`[APIConfig] ${provider.name} key#${ki + 1} /v1/models failed: ${getNetworkErrorMessage(e)}`, e);
               }
+            }
+
+            if (!anySuccess && allModelIds.size === 0) {
+              return { success: false, count: 0, error: lastError || 'API 返回异常' };
             }
           } else {
             // Standard OpenAI-compatible: 遍历每个 key 查 /v1/models，合并去重
