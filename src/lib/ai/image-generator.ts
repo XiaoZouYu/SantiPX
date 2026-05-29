@@ -431,7 +431,12 @@ function getResponsesStatusFromText(text: string): string {
   try {
     return getResponsesStatus(JSON.parse(text));
   } catch {
-    return '';
+    let status = '';
+    for (const payload of parseSseJsonPayloads(text)) {
+      const nextStatus = getResponsesStatus(payload);
+      if (nextStatus) status = nextStatus;
+    }
+    return status;
   }
 }
 
@@ -441,6 +446,10 @@ function getResponsesIdFromText(text: string): string | undefined {
     const id = data?.response?.id || data?.id;
     return typeof id === 'string' && id.startsWith('resp_') ? id : undefined;
   } catch {
+    for (const payload of parseSseJsonPayloads(text)) {
+      const id = payload?.response?.id || payload?.id || payload?.response_id;
+      if (typeof id === 'string' && id.startsWith('resp_')) return id;
+    }
     return undefined;
   }
 }
@@ -487,29 +496,18 @@ function buildResponsesTextInsteadOfImageError(itemTypes: string, textPreview: s
 
 function parseSseJsonPayloads(text: string): any[] {
   const payloads: any[] = [];
-  const blocks = text.split(/\r?\n\r?\n/);
+  let dataLines: string[] = [];
+  let eventName: string | undefined;
 
-  for (const block of blocks) {
-    const dataLines: string[] = [];
-    let eventName: string | undefined;
-    for (const line of block.split(/\r?\n/)) {
-      if (line.startsWith('event:')) {
-        eventName = line.slice(6).trim();
-        continue;
-      }
-      if (line.startsWith('data:')) {
-        dataLines.push(line.replace(/^data:\s?/, ''));
-        continue;
-      }
-      if (/^(id|retry):/.test(line)) continue;
-      if (line.trim().length === 0) continue;
-      if (dataLines.length === 0) continue;
-      dataLines.push(line);
-    }
-    if (dataLines.length === 0) continue;
+  const flush = () => {
+    if (dataLines.length === 0) return;
 
     const payload = dataLines.join('\n').trim();
-    if (!payload || payload === '[DONE]') continue;
+    dataLines = [];
+    if (!payload || payload === '[DONE]') {
+      eventName = undefined;
+      return;
+    }
 
     try {
       const parsed = JSON.parse(payload);
@@ -523,7 +521,35 @@ function parseSseJsonPayloads(text: string): any[] {
     } catch {
       // Ignore malformed keepalive/debug chunks.
     }
+    eventName = undefined;
+  };
+
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      flush();
+      continue;
+    }
+    if (line.startsWith('event:')) {
+      flush();
+      eventName = line.slice(6).trim();
+      continue;
+    }
+    if (line.startsWith('data:')) {
+      dataLines.push(line.replace(/^data:\s?/, ''));
+      continue;
+    }
+    if (/^(id|retry):/.test(line)) continue;
+
+    // Some proxies strip SSE field names and return JSONL-like chunks.
+    if (trimmed.startsWith('{') && dataLines.length === 0) {
+      dataLines.push(trimmed);
+      flush();
+      continue;
+    }
+    if (dataLines.length > 0) dataLines.push(line);
   }
+  flush();
 
   return payloads;
 }
@@ -1125,8 +1151,7 @@ async function submitViaResponsesImage(
     result = parseResponsesImageResponse(responseText);
   } catch (error) {
     const responseId = getResponsesIdFromText(responseText);
-    const responseStatus = getResponsesStatusFromText(responseText);
-    if (!responseId || responseStatus === 'completed' || !isResponsesNoFinalImageError(error)) {
+    if (!responseId || !isResponsesNoFinalImageError(error)) {
       throw error;
     }
     console.log('[ImageGenerator] Responses image accepted but final result is not ready, polling response:', {
